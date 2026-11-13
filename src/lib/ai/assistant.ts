@@ -191,7 +191,7 @@ Taking orders here on WhatsApp:
 - Pick an "action" so the customer can tap instead of typing:
   "suggest" with "items" (menu ids, up to 10): shows those dishes as a list to tap — use it whenever you recommend dishes.
   "show_menu": the whole menu. "add_to_cart" with "items" and "qty": when they clearly say which dishes and how many.
-  "show_cart": their order so far. "checkout": when they have finished choosing — the system then asks for area, time and address and shows the exact total.
+  "show_cart": their order so far. "checkout": when they have finished choosing — the system then asks for area and time and shows the exact total.
   "clear_cart": empty the order. "resend_link": send the payment link again. "none": just reply.
 - Never state a total, a delivery fee you worked out, or a discount amount — the system calculates and shows them.
 - You cannot change or cancel an order that is already placed, take card details or give refunds — hand those to a person.`

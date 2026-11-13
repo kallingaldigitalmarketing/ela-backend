@@ -117,7 +117,7 @@ export function cartMessage(c: { lines: CartLine[]; notes?: string[] }): Out {
 export function editMessage(lines: CartLine[]): Out {
   const rows: ChatListRow[] = [
     ...lines.slice(0, 8).map((l) => ({ id: `o:d:${l.menuItemId}`, title: `Change ${l.name}`, description: `${l.qty} in your order · ${inr(l.price)} each` })),
-    { id: "o:ch", title: "Change delivery details", description: "Area, time or address" },
+    { id: "o:ch", title: "Change delivery details", description: "Area or time" },
     { id: "o:clr", title: "Clear my order", description: "Remove everything and start again" },
   ];
   return { kind: "list", body: "What would you like to change?", button: "Edit order", sections: [{ title: "Edit", rows }] };
@@ -147,27 +147,14 @@ export function slotMessage(days: DayDTO[]): Out {
   return { kind: "list", body: "🕐 When should we deliver? Pick a time.", button: "Choose a time", sections };
 }
 
-export function addressMessage(saved: string | null, area: string): Out {
-  if (saved) {
-    return {
-      kind: "buttons",
-      body: `📍 Deliver to this address in *${area}*?\n\n${saved}`,
-      buttons: [
-        { id: "o:as", title: "Use this address" },
-        { id: "o:an", title: "New address" },
-      ],
-    };
-  }
-  return `📍 Please type your delivery address in *${area}* — house or flat, street and a landmark. You can also share your location.`;
-}
-
 export const NAME_QUESTION = "👤 What name should we put on the order?";
 
 export function reviewMessage(r: {
   lines: CartLine[];
   totals: { subtotal: number; membershipDiscount: number; deliveryFee: number; total: number };
   area: string;
-  address: string;
+  /** Where it's delivered: the delivery point, as on a website order. */
+  place: string;
   when: string | null;
   name: string;
   member: string | null;
@@ -177,7 +164,7 @@ export function reviewMessage(r: {
   const t = r.totals;
   const lines = ["🧾 *Your order*", ...r.lines.map((l) => `${l.qty}× ${l.name} — ${inr(l.price * l.qty)}`), "", `Subtotal: ${inr(t.subtotal)}`];
   if (t.membershipDiscount > 0) lines.push(`${r.member ?? "Member"} discount: −${inr(t.membershipDiscount)}`);
-  lines.push(`Delivery (${r.area}): ${t.deliveryFee > 0 ? inr(t.deliveryFee) : "Free"}`, `*Total: ${inr(t.total)}*`, "", `📍 ${r.address}, ${r.area}`);
+  lines.push(`Delivery (${r.area}): ${t.deliveryFee > 0 ? inr(t.deliveryFee) : "Free"}`, `*Total: ${inr(t.total)}*`, "", `📍 ${r.place}`);
   if (r.when) lines.push(`🕐 ${r.when}`);
   lines.push(`👤 ${r.name}`);
   const body = lines.join("\n");

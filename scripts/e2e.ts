@@ -2331,14 +2331,15 @@ async function main() {
   ok(bodyOf(dropped).includes(`${veg.name} is sold out`) && !bodyOf(dropped).includes(`× ${veg.name}`), "checkout re-checks stock: the sold-out dish is taken out and the customer is told");
   await admin.fetch(`/api/menu/${veg.id}`, { method: "PATCH", body: JSON.stringify({ stock: veg.stock }) });
 
-  // Checkout: area → time → address → summary.
+  // Checkout: area → time → summary (the delivery point is the address, as on the website).
   mark = wa.calls.length;
   await tap("o:x", "Checkout");
   const areaMsg = await next(mark, isInteractive);
   const areaRows = rowsOf(areaMsg);
   ok(areaRows.length > 1 && areaRows.every((r) => r.id.startsWith("o:a:") && /delivery/i.test(r.description ?? "")), "checkout asks for the delivery area, each with its fee");
   const area = areaRows.find((r) => r.id === `o:a:${locationId}`) ?? areaRows[0];
-  const areaLoc = ((await (await new Client().fetch("/api/locations")).json()).locations as { id: string; deliveryFee: number }[]).find((l) => `o:a:${l.id}` === area.id)!;
+  const areaLoc = ((await (await new Client().fetch("/api/locations")).json()).locations as { id: string; name: string; area: string | null; deliveryFee: number }[]).find((l) => `o:a:${l.id}` === area.id)!;
+  const place = areaLoc.area ? `${areaLoc.name}, ${areaLoc.area}` : areaLoc.name;
   mark = wa.calls.length;
   await tap(area.id, area.title, "list");
   const slotMsg = await next(mark, isInteractive);
@@ -2346,12 +2347,10 @@ async function main() {
   ok(slotRows.length > 0 && slotRows.every((r) => r.id.startsWith("o:s:")), "then a delivery time from the real schedule");
   mark = wa.calls.length;
   await tap(slotRows[0].id, slotRows[0].title, "list");
-  ok(/delivery address/i.test(bodyOf(await next(mark))), "then the delivery address");
-  mark = wa.calls.length;
-  await say("Flat 4B, Lotus Apartments, near the temple");
   const reviewMsg = await next(mark, isInteractive);
   const total1 = dishEff * 3 + areaLoc.deliveryFee;
-  ok(bodyOf(reviewMsg).includes(`*Total: ${rupees(total1)}*`) && bodyOf(reviewMsg).includes("Flat 4B") && bodyOf(reviewMsg).includes(buyerName), "the summary shows the items, delivery fee, exact total, address and name");
+  ok(!outTo(mark).some((c) => /address/i.test(bodyOf(c))), "no address question — the delivery point is the address, as on the website");
+  ok(bodyOf(reviewMsg).includes(`*Total: ${rupees(total1)}*`) && bodyOf(reviewMsg).includes(`📍 ${place}`) && bodyOf(reviewMsg).includes(buyerName), "the summary shows the items, delivery fee, exact total, delivery point and name");
   ok(buttonsOf(reviewMsg)[0]?.title === `Pay ${rupees(total1)}` && buttonsOf(reviewMsg).some((b) => b.id === "o:p:cod"), "…with Pay online and Cash on delivery buttons");
 
   // A price change before confirming: new total shown, nothing ordered.
@@ -2372,7 +2371,7 @@ async function main() {
   ok(linkParams?.display_text === `Pay ${rupees(total2)}` && /\/pay\/[a-z0-9]+\?k=/.test(linkParams.url), "confirming creates the order and sends a secure payment link button");
   const waOrder = (await ordersFor())[0];
   ok(waOrder?.source === "whatsapp" && waOrder.total === total2 && waOrder.status === "PENDING" && waOrder.paymentStatus === "UNPAID", "the order is in the Admin Panel as a WhatsApp order awaiting payment, at the confirmed total");
-  ok(!!waOrder && waOrder.items.some((i) => i.name === dish.name && i.qty === 3 && i.price === newEff) && waOrder.address.includes("Flat 4B") && waOrder.deliveryFee === areaLoc.deliveryFee, "…with dishes, quantities, prices, delivery charge and address");
+  ok(!!waOrder && waOrder.items.some((i) => i.name === dish.name && i.qty === 3 && i.price === newEff) && waOrder.address === place && waOrder.deliveryFee === areaLoc.deliveryFee, "…with dishes, quantities, prices, delivery charge and the delivery point as the address (same as a website order)");
   ok(!!(await convByPhone(buyer))?.customerId, "the WhatsApp number becomes a CRM customer linked to the chat");
   mark = wa.calls.length;
   await tap("o:p:online", "Pay");
@@ -2393,7 +2392,7 @@ async function main() {
   ok(bodyOf(await next(mark, isInteractive)).includes("Your order is empty"), "after payment the WhatsApp cart starts afresh");
   await admin.fetch(`/api/menu/${dish.id}`, { method: "PATCH", body: JSON.stringify({ price: dish.price }) });
 
-  // Second order, cash on delivery: area and address are remembered.
+  // Second order, cash on delivery: the area is remembered.
   mark = wa.calls.length;
   await tap(`o:q:${dish.id}:1`, "1");
   await next(mark, isInteractive);
@@ -2403,11 +2402,11 @@ async function main() {
   ok(rowsOf(slot2).length > 0 && rowsOf(slot2).every((r) => r.id.startsWith("o:s:")), "the next order remembers the area and only asks for a time");
   mark = wa.calls.length;
   await tap(rowsOf(slot2)[0].id, rowsOf(slot2)[0].title, "list");
-  const savedAddr = await next(mark, isInteractive);
-  ok(buttonsOf(savedAddr).some((b) => b.id === "o:as") && bodyOf(savedAddr).includes("Flat 4B"), "…and offers the saved address");
+  const review2 = await next(mark, isInteractive);
+  ok(/Total:/.test(bodyOf(review2)) && !outTo(mark).some((c) => /address/i.test(bodyOf(c))), "…then straight to the summary — the address is never asked again");
   mark = wa.calls.length;
   await tap("o:as", "Use this address");
-  await next(mark, isInteractive);
+  ok(/Total:/.test(bodyOf(await next(mark, isInteractive))), "an old 'Use this address' button from an earlier chat still just shows the summary");
   mark = wa.calls.length;
   await tap("o:p:cod", "Cash on delivery");
   const codWa = await waitFor(async () => (await ordersFor()).find((o) => o.paymentMethod === "cod") ?? null);
@@ -2426,9 +2425,6 @@ async function main() {
   const slotR = await next(mark, isInteractive);
   mark = wa.calls.length;
   await tap(rowsOf(slotR)[0].id, rowsOf(slotR)[0].title, "list");
-  await next(mark, isInteractive);
-  mark = wa.calls.length;
-  await tap("o:as", "Use this address");
   await next(mark, isInteractive);
   mark = wa.calls.length;
   await tap("o:p:online", "Pay");

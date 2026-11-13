@@ -15,7 +15,7 @@ import * as ui from "./messages";
 /**
  * Ordering on WhatsApp (spec #8–#14). The customer taps through the menu or
  * tells the assistant what they want; this module keeps their cart, walks
- * them through area → time → address → name → summary, and turns the
+ * them through area → time → name → summary, and turns the
  * confirmed summary into a real order with a payment link.
  *
  * Every step re-reads the live menu, delivery rules and store status, and an
@@ -43,9 +43,6 @@ export type OrderIntent =
   | { type: "area"; id: string }
   | { type: "area_page"; page: number }
   | { type: "slot"; date: string; slotId: string }
-  | { type: "address_saved" }
-  | { type: "address_new" }
-  | { type: "address"; text: string }
   | { type: "name"; text: string }
   | { type: "pay"; method: "online" | "cod" }
   | { type: "resend_link" }
@@ -86,9 +83,9 @@ export function intentFromReply(id: string | null | undefined): OrderIntent | nu
     case "s":
       return a && b ? { type: "slot", date: a, slotId: b } : null;
     case "as":
-      return { type: "address_saved" };
     case "an":
-      return { type: "address_new" };
+      // Address buttons from before the delivery point became the address (as on the website).
+      return { type: "checkout" };
     case "p":
       return { type: "pay", method: a === "cod" ? "cod" : "online" };
     case "pl":
@@ -101,18 +98,13 @@ export function intentFromReply(id: string | null | undefined): OrderIntent | nu
 
 /**
  * Typed words that need no AI: a few ordering keywords, and answers to the
- * question we just asked (a quantity, the address, the name).
+ * question we just asked (a quantity, the name).
  */
 export function textIntent(body: string, type: string, draft: Pick<WaOrderDraft, "step"> | null): OrderIntent | null {
   const t = body.trim();
   const plain = t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
   const step = draft?.step ?? "BROWSING";
   if (step.startsWith("QTY:") && /^\d{1,2}$/.test(plain)) return { type: "set", id: step.slice(4), qty: Number(plain) };
-  if (step === "ADDRESS") {
-    if (type === "location") return { type: "address", text: t.replace(/^\[location\]\s*/, "") };
-    const question = /\?\s*$/.test(t) || /^(what|when|how|can|could|do|does|is|are|why|where|which|will)\b/i.test(t);
-    if (type === "text" && t.length >= 8 && !question) return { type: "address", text: t };
-  }
   if (step === "NAME" && type === "text" && t.length >= 2 && t.length <= 60 && !t.includes("?") && plain.split(" ").length <= 5) return { type: "name", text: t };
   if (/^(menu|show menu|view menu|full menu|see menu|the menu|menu please|order|order food|i want to order|place an order|start order|order now)$/.test(plain)) return { type: "menu" };
   if (/^(cart|my cart|view cart|basket)$/.test(plain)) return { type: "cart" };
@@ -124,7 +116,7 @@ export function textIntent(body: string, type: string, draft: Pick<WaOrderDraft,
 type Ctx = {
   conv: WaConversation;
   draft: WaOrderDraft;
-  customer: { id: string; name: string | null; address: string | null } | null;
+  customer: { id: string; name: string | null } | null;
   setting: StoreSetting | null;
   menu: Dish[];
 };
@@ -139,8 +131,8 @@ function withQty(items: Item[], id: string, qty: number): Item[] {
   if (qty <= 0) return items.filter((i) => i.id !== id);
   return items.some((i) => i.id === id) ? items.map((i) => (i.id === id ? { id, qty } : i)) : [...items, { id, qty }];
 }
-/** After an order the cart empties. The area and name are remembered; the address is offered again (saved on the customer) to confirm. */
-const AFTER_ORDER: Prisma.WaOrderDraftUpdateInput = { items: [], step: "BROWSING", quotedTotal: null, orderId: null, deliveryDate: null, deliverySlotId: null, address: null };
+/** After an order the cart empties. The area and name are remembered. */
+const AFTER_ORDER: Prisma.WaOrderDraftUpdateInput = { items: [], step: "BROWSING", quotedTotal: null, orderId: null, deliveryDate: null, deliverySlotId: null };
 
 async function featured(ctx: Ctx) {
   const content = await prisma.siteContent.findUnique({ where: { id: 1 }, select: { featuredItemId: true, featuredLabel: true } });
@@ -163,7 +155,7 @@ export async function applyIntent(conversationId: string, intent: OrderIntent): 
   const conv = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
   const draft = await prisma.waOrderDraft.upsert({ where: { conversationId }, create: { conversationId }, update: {} });
   const [customer, setting, menu] = await Promise.all([
-    prisma.customer.findUnique({ where: { phone: conv.phone }, select: { id: true, name: true, address: true } }),
+    prisma.customer.findUnique({ where: { phone: conv.phone }, select: { id: true, name: true } }),
     prisma.storeSetting.findUnique({ where: { id: 1 } }),
     liveMenu(),
   ]);
@@ -243,7 +235,7 @@ async function run(ctx: Ctx, intent: OrderIntent): Promise<ui.Out[]> {
     case "checkout":
       return checkout(ctx);
     case "change_details":
-      await save(ctx, { deliveryLocationId: null, deliveryDate: null, deliverySlotId: null, address: null, quotedTotal: null });
+      await save(ctx, { deliveryLocationId: null, deliveryDate: null, deliverySlotId: null, quotedTotal: null });
       return checkout(ctx);
     case "area": {
       const loc = await prisma.deliveryLocation.findFirst({ where: { id: intent.id, active: true } });
@@ -259,17 +251,6 @@ async function run(ctx: Ctx, intent: OrderIntent): Promise<ui.Out[]> {
       await save(ctx, { deliveryDate: intent.date, deliverySlotId: intent.slotId, quotedTotal: null });
       return checkout(ctx);
     }
-    case "address_saved":
-      if (ctx.customer?.address) await save(ctx, { address: ctx.customer.address, quotedTotal: null });
-      return checkout(ctx);
-    case "address_new": {
-      await save(ctx, { step: "ADDRESS", address: null, quotedTotal: null });
-      const loc = ctx.draft.deliveryLocationId ? await prisma.deliveryLocation.findUnique({ where: { id: ctx.draft.deliveryLocationId } }) : null;
-      return [ui.addressMessage(null, loc?.name ?? "your area")];
-    }
-    case "address":
-      await save(ctx, { address: intent.text.replace(/\s+/g, " ").slice(0, 300), quotedTotal: null });
-      return checkout(ctx);
     case "name":
       await save(ctx, { customerName: intent.text.replace(/\s+/g, " ").slice(0, 80) });
       return checkout(ctx);
@@ -318,10 +299,6 @@ async function checkout(ctx: Ctx): Promise<ui.Out[]> {
     }
   }
 
-  if (!ctx.draft.address) {
-    await save(ctx, { step: "ADDRESS" });
-    return [ui.addressMessage(ctx.customer?.address ?? null, loc.name)];
-  }
   if (!ctx.draft.customerName) {
     const known = ctx.customer?.name || ctx.conv.profileName;
     if (!known) {
@@ -335,6 +312,9 @@ async function checkout(ctx: Ctx): Promise<ui.Out[]> {
 
 type Loc = { id: string; name: string; area: string | null; deliveryFee: number };
 
+/** The delivery point is the address, written as for a website order. */
+const placeOf = (loc: Loc) => (loc.area ? `${loc.name}, ${loc.area}` : loc.name);
+
 async function review(ctx: Ctx, lines: CartLine[], loc: Loc): Promise<ui.Out[]> {
   const [membership, gateway] = await Promise.all([getMembership(ctx.customer?.id), activeGateway()]);
   const codEnabled = ctx.setting?.codEnabled ?? true;
@@ -347,7 +327,7 @@ async function review(ctx: Ctx, lines: CartLine[], loc: Loc): Promise<ui.Out[]> 
       lines,
       totals,
       area: loc.name,
-      address: ctx.draft.address!,
+      place: placeOf(loc),
       when: slot && ctx.draft.deliveryDate ? `${humanDate(ctx.draft.deliveryDate)}, ${slot.label}` : null,
       name: ctx.draft.customerName!,
       member: membership.active ? membership.planName : null,
@@ -395,7 +375,7 @@ async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
   const { lines, problems } = await priceCart(itemsOf(ctx.draft));
   if (problems.length || !lines.length) return checkout(ctx);
   const loc = ctx.draft.deliveryLocationId ? await prisma.deliveryLocation.findFirst({ where: { id: ctx.draft.deliveryLocationId, active: true } }) : null;
-  if (!loc || !ctx.draft.address) return checkout(ctx);
+  if (!loc) return checkout(ctx);
   const slotsConfigured = (await prisma.deliverySlot.count({ where: { active: true } })) > 0;
   if (slotsConfigured) {
     const problem = ctx.draft.deliveryDate && ctx.draft.deliverySlotId ? await assertSlotAvailable(ctx.draft.deliveryDate, ctx.draft.deliverySlotId, loc.id) : "Please choose a delivery time.";
@@ -432,8 +412,8 @@ async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
   const name = ctx.draft.customerName || ctx.conv.profileName || "Customer";
   const customer = await prisma.customer.upsert({
     where: { phone: ctx.conv.phone },
-    create: { phone: ctx.conv.phone, name, address: ctx.draft.address },
-    update: { address: ctx.draft.address, ...(ctx.customer?.name ? {} : { name }) },
+    create: { phone: ctx.conv.phone, name },
+    update: ctx.customer?.name ? {} : { name },
   });
   if (ctx.conv.customerId !== customer.id) await prisma.waConversation.update({ where: { id: ctx.conv.id }, data: { customerId: customer.id } });
 
@@ -443,7 +423,7 @@ async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
       customerId: customer.id,
       customerName: name,
       customerPhone: `+${ctx.conv.phone}`,
-      address: `${ctx.draft.address}, ${loc.name}${loc.area ? ` (${loc.area})` : ""}`,
+      address: placeOf(loc),
       deliveryLocationId: loc.id,
       deliveryDate: slotsConfigured && ctx.draft.deliveryDate ? toDbDate(ctx.draft.deliveryDate) : null,
       deliverySlotId: slotsConfigured ? ctx.draft.deliverySlotId : null,
@@ -545,7 +525,6 @@ export async function orderingFacts(conversationId: string): Promise<string> {
   const waiting: Record<string, string> = {
     AREA: "their delivery area (a list was sent)",
     SLOT: "a delivery time (a list was sent)",
-    ADDRESS: "their delivery address",
     NAME: "the name for the order",
     REVIEW: "them to confirm the order summary (buttons were sent)",
     PAYMENT: "payment — a secure payment link was sent",
